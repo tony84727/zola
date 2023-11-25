@@ -10,6 +10,5 @@ COPY . .
 RUN cargo build --release --target x86_64-unknown-linux-gnu
 
 
-FROM gcr.io/distroless/cc
+FROM docker.io/debian:12
 COPY --from=builder /app/target/x86_64-unknown-linux-gnu/release/zola /bin/zola
-ENTRYPOINT [ "/bin/zola" ]
