@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use cli::{Cli, Command};
+use errors::anyhow;
 use utils::net::{get_available_port, port_is_available};
 
 use clap::{CommandFactory, Parser};
@@ -13,23 +14,39 @@ mod messages;
 mod prompt;
 
 fn get_config_file_path(dir: &Path, config_path: &Path) -> (PathBuf, PathBuf) {
-    let root_dir = dir
-        .ancestors()
-        .find(|a| a.join(config_path).exists())
-        .unwrap_or_else(|| panic!("could not find directory containing config file"));
+    let root_dir = dir.ancestors().find(|a| a.join(config_path).exists()).unwrap_or_else(|| {
+        messages::unravel_errors(
+            "",
+            &anyhow!(
+                "{} not found in current directory or ancestors, current_dir is {}",
+                config_path.display(),
+                dir.display()
+            ),
+        );
+        std::process::exit(1);
+    });
 
-    // if we got here we found root_dir so config file should exist so we can unwrap safely
-    let config_file = root_dir
-        .join(config_path)
-        .canonicalize()
-        .unwrap_or_else(|_| panic!("could not find directory containing config file"));
+    // if we got here we found root_dir so config file should exist so we could theoretically unwrap safely
+    let config_file_uncanonicalized = root_dir.join(config_path);
+    let config_file = config_file_uncanonicalized.canonicalize().unwrap_or_else(|e| {
+        messages::unravel_errors(
+            &format!("Could not find canonical path of {}", config_file_uncanonicalized.display()),
+            &e.into(),
+        );
+        std::process::exit(1);
+    });
+
     (root_dir.to_path_buf(), config_file)
 }
 
 fn main() {
     let cli = Cli::parse();
-    let cli_dir: PathBuf = cli.root.canonicalize().unwrap_or_else(|_| {
-        panic!("Could not find canonical path of root dir: {}", cli.root.display())
+    let cli_dir: PathBuf = cli.root.canonicalize().unwrap_or_else(|e| {
+        messages::unravel_errors(
+            &format!("Could not find canonical path of root dir: {}", cli.root.display()),
+            &e.into(),
+        );
+        std::process::exit(1);
     });
 
     match cli.command {
@@ -62,6 +79,7 @@ fn main() {
             interface,
             mut port,
             output_dir,
+            force,
             base_url,
             drafts,
             open,
@@ -87,6 +105,7 @@ fn main() {
                 &interface,
                 port,
                 output_dir.as_deref(),
+                force,
                 &base_url,
                 &config_file,
                 open,

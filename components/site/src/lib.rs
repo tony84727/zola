@@ -370,7 +370,7 @@ impl Site {
                 if self.config.build_search_index && !index_section.meta.in_search_index {
                     bail!(
                     "You have enabled search in the config but disabled it in the index section: \
-                    either turn off the search in the config or remote `in_search_index = true` from the \
+                    either turn off the search in the config or remove `in_search_index = true` from the \
                     section front-matter."
                     )
                 }
@@ -587,11 +587,26 @@ impl Site {
                 &self.base_path.join("themes").join(theme).join("static"),
                 &self.output_path,
                 false,
+                None,
             )?;
         }
         // We're fine with missing static folders
         if self.static_path.exists() {
-            copy_directory(&self.static_path, &self.output_path, self.config.hard_link_static)?;
+            if let Some(gs) = &self.config.ignored_static_globset {
+                copy_directory(
+                    &self.static_path,
+                    &self.output_path,
+                    self.config.hard_link_static,
+                    Some(gs),
+                )?;
+            } else {
+                copy_directory(
+                    &self.static_path,
+                    &self.output_path,
+                    self.config.hard_link_static,
+                    None,
+                )?;
+            }
         }
 
         Ok(())
@@ -787,11 +802,7 @@ impl Site {
     }
 
     fn index_for_lang(&self, lang: &str) -> Result<()> {
-        let index_json = search::build_index(
-            &self.config.default_language,
-            &self.library.read().unwrap(),
-            &self.config,
-        )?;
+        let index_json = search::build_index(lang, &self.library.read().unwrap(), &self.config)?;
         let (path, content) = match &self.config.search.index_format {
             IndexFormat::ElasticlunrJson => {
                 let path = self.output_path.join(format!("search_index.{}.json", lang));

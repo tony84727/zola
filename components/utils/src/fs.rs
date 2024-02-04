@@ -1,4 +1,5 @@
 use libs::filetime::{set_file_mtime, FileTime};
+use libs::globset::GlobSet;
 use libs::walkdir::WalkDir;
 use std::fs::{copy, create_dir_all, metadata, remove_dir_all, remove_file, File};
 use std::io::prelude::*;
@@ -86,7 +87,12 @@ pub fn copy_file_if_needed(src: &Path, dest: &Path, hard_link: bool) -> Result<(
     }
 
     if hard_link {
-        std::fs::hard_link(src, dest)?
+        if dest.exists() {
+            std::fs::remove_file(dest)
+                .with_context(|| format!("Error removing file: {:?}", dest))?;
+        }
+        std::fs::hard_link(src, dest)
+            .with_context(|| format!("Error hard linking file, src: {:?}, dst: {:?}", src, dest))?;
     } else {
         let src_metadata = metadata(src)
             .with_context(|| format!("Failed to get metadata of {}", src.display()))?;
@@ -110,11 +116,23 @@ pub fn copy_file_if_needed(src: &Path, dest: &Path, hard_link: bool) -> Result<(
     Ok(())
 }
 
-pub fn copy_directory(src: &Path, dest: &Path, hard_link: bool) -> Result<()> {
+pub fn copy_directory(
+    src: &Path,
+    dest: &Path,
+    hard_link: bool,
+    ignore_globset: Option<&GlobSet>,
+) -> Result<()> {
     for entry in
         WalkDir::new(src).follow_links(true).into_iter().filter_map(std::result::Result::ok)
     {
         let relative_path = entry.path().strip_prefix(src).unwrap();
+
+        if let Some(gs) = ignore_globset {
+            if gs.is_match(relative_path) {
+                continue;
+            }
+        }
+
         let target_path = dest.join(relative_path);
 
         if entry.path().is_dir() {
@@ -181,6 +199,8 @@ pub fn is_temp_file(path: &Path) -> bool {
     match ext {
         Some(ex) => match ex.to_str().unwrap() {
             "swp" | "swx" | "tmp" | ".DS_STORE" | ".DS_Store" => true,
+            // kate
+            "kate-swp" => true,
             // jetbrains IDE
             x if x.ends_with("jb_old___") => true,
             x if x.ends_with("jb_tmp___") => true,

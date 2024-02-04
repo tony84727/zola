@@ -59,6 +59,11 @@ minify_html = false
 #     ignored_content = ["*.{graphml,xlsx}", "temp.*", "**/build_folder"]
 ignored_content = []
 
+# Similar to ignored_content, a list of glob patterns specifying asset files to
+# ignore when the static directory is processed. Defaults to none, which means
+# that all asset files are copied over to the `public` directory
+ignored_static = []
+
 # When set to "true", a feed is automatically generated.
 generate_feed = false
 
@@ -124,6 +129,11 @@ external_links_no_referrer = false
 # Whether smart punctuation is enabled (changing quotes, dashes, dots in their typographic form)
 # For example, `...` into `…`, `"quote"` into `“curly”` etc
 smart_punctuation = false
+
+# Whether to set decoding="async" and loading="lazy" for all images
+# When turned on, the alt text must be plain text.
+# For example, `![xx](...)` is ok but `![*x*x](...)` isn’t ok
+lazy_async_image = false
 
 # Configuration of the link checker.
 [link_checker]

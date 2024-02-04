@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.18.0 (2023-12-18)
+
+- Fix LFI in `zola serve`
+- Do not panic when root directory or config file not found
+- Fix base_url link attributes in atom templates
+- Use all authors for atom templates
+- Always sort page/section assets by filename
+- Allow setting attributes to lazy load all images from Config.toml
+- Fix HTML generated in class based highlighting with line numbers
+- Add a `replace_re` filter
+- Speed up `zola check` and only checks external links once, even if present in multiple languages
+- Add `search.index_format` into the serialized config in the templates
+- Add --force flag in `zola serve` if the directory is not empty
+- Add `ignored_static` to the config to ignore specific files from the static directory
+- Add Hungarian support for search
+- Actually remove codeblocks from search index
+- Fix taxonomies missing lang in sitemap
+
 ## 0.17.2 (2023-03-19)
 
 - Fix one more invalid error with colocated directories

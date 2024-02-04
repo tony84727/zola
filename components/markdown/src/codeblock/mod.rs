@@ -77,7 +77,7 @@ impl<'config> CodeBlock<'config> {
         path: Option<&'config str>,
     ) -> (Self, String) {
         let syntax_and_theme = resolve_syntax_and_theme(fence.language, config);
-        if syntax_and_theme.source == HighlightSource::NotFound {
+        if syntax_and_theme.source == HighlightSource::NotFound && config.markdown.highlight_code {
             let lang = fence.language.unwrap();
             if let Some(p) = path {
                 eprintln!("Warning: Highlight language {} not found in {}", lang, p);
@@ -166,10 +166,6 @@ impl<'config> CodeBlock<'config> {
             if self.line_numbers {
                 buffer.push_str("</td></tr>");
             }
-        }
-
-        if let Some(rest) = self.highlighter.finalize() {
-            buffer.push_str(&rest);
         }
 
         if self.line_numbers {

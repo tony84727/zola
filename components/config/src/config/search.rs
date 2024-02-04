@@ -2,15 +2,11 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum IndexFormat {
     ElasticlunrJson,
+    #[default]
     ElasticlunrJavascript,
-}
-
-impl Default for IndexFormat {
-    fn default() -> IndexFormat {
-        IndexFormat::ElasticlunrJavascript
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -43,4 +39,15 @@ impl Default for Search {
             index_format: Default::default(),
         }
     }
+}
+
+impl Search {
+    pub fn serialize(&self) -> SerializedSearch {
+        SerializedSearch { index_format: &self.index_format }
+    }
+}
+
+#[derive(Serialize)]
+pub struct SerializedSearch<'a> {
+    pub index_format: &'a IndexFormat,
 }

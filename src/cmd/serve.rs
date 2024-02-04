@@ -47,7 +47,7 @@ use libs::serde_json;
 use notify::{watcher, RecursiveMode, Watcher};
 use ws::{Message, Sender, WebSocket};
 
-use errors::{anyhow, Context, Result};
+use errors::{anyhow, Context, Error, Result};
 use pathdiff::diff_paths;
 use site::sass::compile_sass;
 use site::{Site, SITE_CONTENT};
@@ -132,6 +132,14 @@ async fn handle_request(req: Request<Body>, mut root: PathBuf) -> Result<Respons
     // Remove the first slash from the request path
     // otherwise `PathBuf` will interpret it as an absolute path
     root.push(&decoded[1..]);
+
+    // Resolve the root + user supplied path into the absolute path
+    // this should hopefully remove any path traversals
+    // if we fail to resolve path, we should return 404
+    root = match tokio::fs::canonicalize(&root).await {
+        Ok(d) => d,
+        Err(_) => return Ok(not_found()),
+    };
 
     // Ensure we are only looking for things in our public folder
     if !root.starts_with(original_root) {
@@ -316,6 +324,7 @@ fn create_new_site(
     interface: &str,
     interface_port: u16,
     output_dir: Option<&Path>,
+    force: bool,
     base_url: &str,
     config_file: &Path,
     include_drafts: bool,
@@ -346,6 +355,12 @@ fn create_new_site(
     site.enable_serve_mode();
     site.set_base_url(base_url);
     if let Some(output_dir) = output_dir {
+        if !force && output_dir.exists() {
+            return Err(Error::msg(format!(
+                "Directory '{}' already exists. Use --force to overwrite.",
+                output_dir.display(),
+            )));
+        }
         site.set_output_path(output_dir);
     }
     if include_drafts {
@@ -369,6 +384,7 @@ pub fn serve(
     interface: &str,
     interface_port: u16,
     output_dir: Option<&Path>,
+    force: bool,
     base_url: &str,
     config_file: &Path,
     open: bool,
@@ -383,6 +399,7 @@ pub fn serve(
         interface,
         interface_port,
         output_dir,
+        force,
         base_url,
         config_file,
         include_drafts,
@@ -553,6 +570,12 @@ pub fn serve(
     };
 
     let copy_static = |site: &Site, path: &Path, partial_path: &Path| {
+        // Do nothing if the file/dir is on the ignore list
+        if let Some(gs) = &site.config.ignored_static_globset {
+            if gs.is_match(partial_path) {
+                return;
+            }
+        }
         // Do nothing if the file/dir was deleted
         if !path.exists() {
             return;
@@ -585,6 +608,7 @@ pub fn serve(
         interface,
         interface_port,
         output_dir,
+        force,
         base_url,
         config_file,
         include_drafts,
@@ -788,6 +812,7 @@ mod tests {
             Path::new("hello.html.__jb_bak___"),
             Path::new("hello.html~"),
             Path::new("#hello.html"),
+            Path::new(".index.md.kate-swp"),
         ];
 
         for t in test_cases {
