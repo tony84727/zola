@@ -123,11 +123,11 @@ logic applies.
 1. The base directory is the Zola root directory, where the `config.toml` is
 2. For the given path: if it starts with `@/`, replace that with `content/` instead and trim any leading `/`
 3. Search in the following locations in this order, returning the first where the file exists:
-   1. $base_directory + $path
-   2. $base_directory + "static/" + $path
-   3. $base_directory + "content/" + $path
-   4. $base_directory + $output_path + $path
-   5. $base_directory + "themes" + $theme + "static/" + $path (only if using a theme)
+   1. `$base_directory` + `$path`
+   2. `$base_directory` + `"static/"` + `$path`
+   3. `$base_directory` + `"content/"` + `$path`
+   4. `$base_directory` + `$output_path` + `$path`
+   5. `$base_directory` + `"themes"` + `$theme` + `"static/"` + `$path` (only if using a theme)
 
 In practice this means that `@/some/image.jpg`, `/content/some/image.jpg` and `content/some/image.jpg` will point to the
 same thing.
@@ -141,6 +141,18 @@ Takes a path to an `.md` file and returns the associated page. The base path is 
 {% set page = get_page(path="blog/page2.md") %}
 ```
 
+If selecting a specific language for the page, you can pass `lang` with the language code to the function:
+
+```jinja2
+{% set page = get_page(path="blog/page2.md", lang="fr") %}
+
+{# If "fr" is the default language, this is equivalent to #}
+{% set page = get_page(path="blog/page2.md") %}
+
+{# If "fr" is not the default language, this is equivalent to #}
+{% set page = get_page(path="blog/page2.fr.md") %}
+```
+
 ### `get_section`
 Takes a path to an `_index.md` file and returns the associated section. The base path is the `content` directory.
 
@@ -152,6 +164,18 @@ If you only need the metadata of the section, you can pass `metadata_only=true` 
 
 ```jinja2
 {% set section = get_section(path="blog/_index.md", metadata_only=true) %}
+```
+
+If selecting a specific language for the section, you can pass `lang` with the language code to the function:
+
+```jinja2
+{% set section = get_section(path="blog/_index.md", lang="fr") %}
+
+{# If "fr" is the default language, this is equivalent to #}
+{% set section = get_section(path="blog/_index.md") %}
+
+{# If "fr" is not the default language, this is equivalent to #}
+{% set section = get_section(path="blog/_index.fr.md") %}
 ```
 
 ### `get_taxonomy_url`
@@ -209,7 +233,7 @@ See the [Taxonomies documentation](@/documentation/templates/taxonomies.md) for 
 
 ### `get_url`
 Gets the permalink for the given path.
-If the path starts with `@/`, it will be treated as an internal link like the ones used in Markdown, 
+If the path starts with `@/`, it will be treated as an [internal link](@/documentation/content/linking.md#internal-links) to a Markdown file, 
 starting from the root `content` directory as well as validated.
 
 ```jinja2
@@ -281,7 +305,7 @@ It can take the following arguments:
 - `path`: mandatory, see [File Searching Logic](@/documentation/templates/overview.md#file-searching-logic) for details
 - `allow_missing`: optional, `true` or `false`, defaults to `false`. Whether a missing file should raise an error or not.
 
-The method returns a map containing `width`, `height` and `format` (the lowercased value as string).
+The method returns a map containing `width`, `height`, `format`, and `mime`. The `format` returned is the most common file extension for the file format, which may not match the one used for the image.
 
 ```jinja2
   {% set meta = get_image_metadata(path="...") %}

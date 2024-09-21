@@ -82,9 +82,11 @@ impl Library {
 
     pub fn insert_page(&mut self, page: Page) {
         let file_path = page.file.path.clone();
-        let mut entries = vec![page.path.clone()];
-        entries.extend(page.meta.aliases.to_vec());
-        self.insert_reverse_aliases(&file_path, entries);
+        if page.meta.render {
+            let mut entries = vec![page.path.clone()];
+            entries.extend(page.meta.aliases.to_vec());
+            self.insert_reverse_aliases(&file_path, entries);
+        }
 
         for (taxa_name, terms) in &page.meta.taxonomies {
             for term in terms {
@@ -293,6 +295,9 @@ impl Library {
 
         // Then once we took care of the sections, we find the pages of each section
         for (path, page) in self.pages.iter_mut() {
+            if !page.meta.render {
+                continue;
+            }
             let parent_filename = &index_filename_by_lang[&page.lang];
             add_translation(&page.file.canonical, path);
             let mut parent_section_path = page.file.parent.join(parent_filename);

@@ -3,12 +3,14 @@ use std::path::{Path, PathBuf};
 use std::{cmp, collections::HashMap, collections::HashSet, iter::FromIterator, thread};
 
 use config::LinkCheckerLevel;
+use libs::globset::GlobSet;
 use libs::rayon::prelude::*;
 
 use crate::Site;
 use errors::{bail, Result};
 use libs::rayon;
 use libs::url::Url;
+use utils::anchors::is_special_anchor;
 
 /// Check whether all internal links pointing to explicit anchor fragments are valid.
 ///
@@ -39,6 +41,7 @@ pub fn check_internal_links_with_anchors(site: &Site) -> Vec<String> {
             (md_path, Some(anchor)) => Some((page_path, md_path, anchor)),
             _ => None,
         })
+        .filter(|(_, _, anchor)| !is_special_anchor(anchor))
         .inspect(|_| anchors_total = anchors_total.saturating_add(1));
 
     // Check for targets existence (including anchors), then keep only the faulty
@@ -105,6 +108,10 @@ fn should_skip_by_prefix(link: &str, skip_prefixes: &[String]) -> bool {
     skip_prefixes.iter().any(|prefix| link.starts_with(prefix))
 }
 
+fn should_skip_by_file(file_path: &Path, glob_set: &GlobSet) -> bool {
+    glob_set.is_match(file_path)
+}
+
 fn get_link_domain(link: &str) -> Result<String> {
     return match Url::parse(link) {
         Ok(url) => match url.host_str().map(String::from) {
@@ -150,9 +157,12 @@ pub fn check_external_links(site: &Site) -> Vec<String> {
     let mut invalid_url_links: u32 = 0;
     // First we look at all the external links, skip those the user wants to skip and record
     // the ones that have invalid URLs
+    let ignored_files_globset = site.config.link_checker.ignored_files_globset.as_ref().unwrap();
     for (file_path, links) in external_links {
         for link in links {
-            if should_skip_by_prefix(link, &site.config.link_checker.skip_prefixes) {
+            if should_skip_by_prefix(link, &site.config.link_checker.skip_prefixes)
+                || should_skip_by_file(file_path, ignored_files_globset)
+            {
                 skipped_link_count += 1;
             } else {
                 match get_link_domain(link) {
@@ -170,13 +180,15 @@ pub fn check_external_links(site: &Site) -> Vec<String> {
         }
     }
 
+    // Get unique links count from Vec by creating a temporary HashSet.
+    let unique_links_count = HashSet::<&str>::from_iter(
+        checked_links.iter().map(|link_def| link_def.external_link.as_str()),
+    )
+    .len();
+
     println!(
         "Checking {} external link(s). Skipping {} external link(s).{}",
-        // Get unique links count from Vec by creating a temporary HashSet.
-        HashSet::<&str>::from_iter(
-            checked_links.iter().map(|link_def| link_def.external_link.as_str())
-        )
-        .len(),
+        unique_links_count,
         skipped_link_count,
         if invalid_url_links == 0 {
             "".to_string()
@@ -264,7 +276,7 @@ pub fn check_external_links(site: &Site) -> Vec<String> {
 
             println!(
                 "> Checked {} external link(s): {} error(s) found.",
-                checked_links.len(),
+                unique_links_count,
                 errors.len()
             );
 

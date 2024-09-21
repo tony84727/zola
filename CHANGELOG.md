@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.19.2 (2024-08-15)
+
+- Fix some of YAML date parsing
+- Fix feed generation for languages not working in some cases (it was taking the value from the root of the config for
+feed_filenames)
+- Ignore `.bck` files in `zola serve`
+- Fix change monitoring on Windows
+- Allow disabling sitemap.xml and robots.txt generation
+- Fix shortcodes in inline HTML
+- Ignore code blocks in word count
+
+## 0.19.1 (2024-06-24)
+
+- Fix `config.generate_feeds` being still serialized as `config.generate_feed`. Both are available for now
+- Fix `zola serve` not reacting to changes on some OSes
+
+## 0.19.0 (2024-06-20)
+
+- Updates the pulldown-cmark dependency to v0.11.0. This improves footnote handling, and may also introduce some minor behavior changes such as reducing the amount of unnecessary HTML-escaping of text content.
+- Add bottom footnotes with backreference option
+- Fix link check report inconsistency
+- Fix resizing for images with EXIF orientation
+- Add MIME type to get_image_metadata
+- Fix hot loading for config.toml in some cases
+- Add `render = false` capability to pages
+- Handle string dates in YAML front-matter
+- Add support for fuse.js search format
+- Added support for generating multiple kinds of feeds at once
+- Changed config options named `generate_feed` to `generate_feeds` (both in config.toml and in section front-matter)
+- Changed config option `feed_filename: String` to `feed_filenames: Vec<String>`
+- The config file no longer allows arbitrary fields outside the `[extra]` section
+
 ## 0.18.0 (2023-12-18)
 
 - Fix LFI in `zola serve`

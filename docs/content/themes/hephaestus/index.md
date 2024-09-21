@@ -3,11 +3,11 @@
 title = "hephaestus"
 description = "A portfolio theme"
 template = "theme.html"
-date = 2024-01-25T10:41:35+02:00
+date = 2024-09-02T05:58:27Z
 
 [extra]
-created = 2024-01-25T10:41:35+02:00
-updated = 2024-01-25T10:41:35+02:00
+created = 2024-09-02T05:58:27Z
+updated = 2024-09-02T05:58:27Z
 repository = "https://github.com/BConquest/hephaestus.git"
 homepage = "https://github.com/BConquest/hephaestus"
 minimum_version = "0.4.0"

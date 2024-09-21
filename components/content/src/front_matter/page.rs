@@ -7,7 +7,7 @@ use time::macros::{format_description, time};
 use time::{Date, OffsetDateTime, PrimitiveDateTime};
 
 use errors::{bail, Result};
-use utils::de::{fix_toml_dates, from_toml_datetime};
+use utils::de::{fix_toml_dates, from_unknown_datetime};
 
 use crate::front_matter::split::RawFrontMatter;
 
@@ -20,7 +20,7 @@ pub struct PageFrontMatter {
     /// Description in <meta> that appears when linked, e.g. on twitter
     pub description: Option<String>,
     /// Updated date
-    #[serde(default, deserialize_with = "from_toml_datetime")]
+    #[serde(default, deserialize_with = "from_unknown_datetime")]
     pub updated: Option<String>,
     /// Datetime content was last updated
     #[serde(default, skip_deserializing)]
@@ -29,7 +29,7 @@ pub struct PageFrontMatter {
     #[serde(default, skip_deserializing)]
     pub updated_datetime_tuple: Option<(i32, u8, u8)>,
     /// Date if we want to order pages (ie blog post)
-    #[serde(default, deserialize_with = "from_toml_datetime")]
+    #[serde(default, deserialize_with = "from_unknown_datetime")]
     pub date: Option<String>,
     /// Datetime content was created
     #[serde(default, skip_deserializing)]
@@ -39,6 +39,10 @@ pub struct PageFrontMatter {
     pub datetime_tuple: Option<(i32, u8, u8)>,
     /// Whether this page is a draft
     pub draft: bool,
+    /// Prevent generation of a folder for current page
+    /// Defaults to `true`
+    #[serde(skip_serializing)]
+    pub render: bool,
     /// The page slug. Will be used instead of the filename if present
     /// Can't be an empty string if present
     pub slug: Option<String>,
@@ -151,6 +155,7 @@ impl Default for PageFrontMatter {
             datetime: None,
             datetime_tuple: None,
             draft: false,
+            render: true,
             slug: None,
             path: None,
             taxonomies: HashMap::new(),
@@ -326,6 +331,36 @@ date: 2002-10-02T15:00:00.123456Z
         let res = PageFrontMatter::parse(content).unwrap();
         assert!(res.datetime.is_some());
         assert_eq!(res.datetime.unwrap(), datetime!(2002 - 10 - 02 15:00:00.123456 UTC));
+    }
+
+    #[test_case(&RawFrontMatter::Yaml(r#"
+title: Hello
+description: hey there
+date: 2001-12-15T02:59:43.1Z
+"#); "canonical")]
+    #[test_case(&RawFrontMatter::Yaml(r#"
+title: Hello
+description: hey there
+date: 2001-12-14t21:59:43.10-05:00
+"#); "iso8601")]
+    #[test_case(&RawFrontMatter::Yaml(r#"
+title: Hello
+description: hey there
+date: 2001-12-14 21:59:43.10 -5
+"#); "space separated")]
+    #[test_case(&RawFrontMatter::Yaml(r#"
+title: Hello
+description: hey there
+date: 2001-12-15 2:59:43.10
+"#); "no time zone")]
+    #[test_case(&RawFrontMatter::Yaml(r#"
+title: Hello
+description: hey there
+date: 2001-12-15
+"#); "date only")]
+    fn can_parse_yaml_dates(content: &RawFrontMatter) {
+        let res = PageFrontMatter::parse(content).unwrap();
+        assert!(res.datetime.is_some());
     }
 
     #[test_case(&RawFrontMatter::Toml(r#"

@@ -65,12 +65,12 @@ ignored_content = []
 ignored_static = []
 
 # When set to "true", a feed is automatically generated.
-generate_feed = false
+generate_feeds = false
 
-# The filename to use for the feed. Used as the template filename, too.
-# Defaults to "atom.xml", which has a built-in template that renders an Atom 1.0 feed.
+# The filenames to use for the feeds. Used as the template filenames, too.
+# Defaults to ["atom.xml"], which has a built-in template that renders an Atom 1.0 feed.
 # There is also a built-in template "rss.xml" that renders an RSS 2.0 feed.
-feed_filename = "atom.xml"
+feed_filenames = ["atom.xml"]
 
 # The number of articles to include in the feed. All items are included if
 # this limit is not set (the default).
@@ -99,6 +99,12 @@ taxonomies = []
 # When set to "true", a search index is built from the pages and section
 # content for `default_language`.
 build_search_index = false
+
+# When set to "false", Sitemap.xml is not generated
+generate_sitemap = true
+
+# When set to "false", robots.txt is not generated
+generate_robots_txt = true
 
 # Configuration of the Markdown rendering
 [markdown]
@@ -135,6 +141,9 @@ smart_punctuation = false
 # For example, `![xx](...)` is ok but `![*x*x](...)` isn’t ok
 lazy_async_image = false
 
+# Whether footnotes are rendered in the GitHub-style (at the bottom, with back references) or plain (in the place, where they are defined)
+bottom_footnotes = false
+
 # Configuration of the link checker.
 [link_checker]
 # Skip link checking for external URLs that start with these prefixes
@@ -169,16 +178,20 @@ paths_keep_dates = false
 include_title = true
 # Whether to include the description of the page/section in the index
 include_description = false
-# Whether to include the path of the page/section in the index
+# Whether to include the RFC3339 datetime of the page in the search index
+include_date = false
+# Whether to include the path of the page/section in the index (the permalink is always included)
 include_path = false
 # Whether to include the rendered content of the page/section in the index
 include_content = true
-# At which character to truncate the content to. Useful if you have a lot of pages and the index would
+# At which code point to truncate the content to. Useful if you have a lot of pages and the index would
 # become too big to load on the site. Defaults to not being set.
 # truncate_content_length = 100
 
 # Wether to produce the search index as a javascript file or as a JSON file
-# Accepted value "elasticlunr_javascript" or "elasticlunr_json"
+# Accepted values:
+# - "elasticlunr_javascript", "elasticlunr_json"
+# - "fuse_javascript", "fuse_json"
 index_format = "elasticlunr_javascript"
 
 # Optional translation object for the default language
@@ -192,13 +205,13 @@ index_format = "elasticlunr_javascript"
 
 # Additional languages definition
 # You can define language specific config values and translations: 
-# title, description, generate_feed, feed_filename, taxonomies, build_search_index
+# title, description, generate_feeds, feed_filenames, taxonomies, build_search_index
 # as well as its own search configuration and translations (see above for details on those)
 [languages]
 # For example
 # [languages.fr]
 # title = "Mon blog"
-# generate_feed = true
+# generate_feeds = true
 # taxonomies = [
 #    {name = "auteurs"},
 #    {name = "tags"},

@@ -112,6 +112,9 @@ weight = 0
 # A draft page is only loaded if the `--drafts` flag is passed to `zola build`, `zola serve` or `zola check`.
 draft = false
 
+# When set to "false" Zola will not create a separate folder with index.html inside for this page.
+render = false
+
 # If set, this slug will be used instead of the filename to make the URL.
 # The section path will still be used.
 slug = ""
@@ -152,7 +155,7 @@ template = "page.html"
 You can ask Zola to create a summary if, for example, you only want to show the first
 paragraph of the page content in a list.
 
-To do so, add <code>&lt;!-- more --&gt;</code> in your content at the point
+To do so, add `<!-- more -->` in your content at the point
 where you want the summary to end. The content up to that point will be
 available separately in the
 [template](@/documentation/templates/pages-sections.md#page-variables) via `page.summary`.

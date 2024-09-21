@@ -22,9 +22,8 @@
 // WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 use std::cell::Cell;
-use std::fs::read_dir;
 use std::future::IntoFuture;
-use std::net::{SocketAddrV4, TcpListener};
+use std::net::{IpAddr, SocketAddr, TcpListener};
 use std::path::{Path, PathBuf, MAIN_SEPARATOR};
 use std::sync::mpsc::channel;
 use std::sync::Mutex;
@@ -40,31 +39,20 @@ use mime_guess::from_path as mimetype_from_path;
 use time::macros::format_description;
 use time::{OffsetDateTime, UtcOffset};
 
-use libs::globset::GlobSet;
 use libs::percent_encoding;
 use libs::relative_path::{RelativePath, RelativePathBuf};
 use libs::serde_json;
-use notify::{watcher, RecursiveMode, Watcher};
+use notify_debouncer_full::{new_debouncer, notify::RecursiveMode, notify::Watcher};
 use ws::{Message, Sender, WebSocket};
 
 use errors::{anyhow, Context, Error, Result};
-use pathdiff::diff_paths;
 use site::sass::compile_sass;
 use site::{Site, SITE_CONTENT};
-use utils::fs::{clean_site_output_folder, copy_file, is_temp_file};
+use utils::fs::{clean_site_output_folder, copy_file, create_directory};
 
+use crate::fs_utils::{filter_events, ChangeKind, SimpleFileSystemEventKind};
 use crate::messages;
 use std::ffi::OsStr;
-
-#[derive(Debug, PartialEq)]
-enum ChangeKind {
-    Content,
-    Templates,
-    Themes,
-    StaticFiles,
-    Sass,
-    Config,
-}
 
 #[derive(Debug, PartialEq)]
 enum WatchMode {
@@ -92,16 +80,34 @@ fn set_serve_error(msg: &'static str, e: errors::Error) {
     }
 }
 
-async fn handle_request(req: Request<Body>, mut root: PathBuf) -> Result<Response<Body>> {
+async fn handle_request(
+    req: Request<Body>,
+    mut root: PathBuf,
+    base_path: String,
+) -> Result<Response<Body>> {
+    let path_str = req.uri().path();
+    if !path_str.starts_with(&base_path) {
+        return Ok(not_found());
+    }
+
+    let trimmed_path = &path_str[base_path.len() - 1..];
+
     let original_root = root.clone();
     let mut path = RelativePathBuf::new();
     // https://zola.discourse.group/t/percent-encoding-for-slugs/736
-    let decoded = match percent_encoding::percent_decode_str(req.uri().path()).decode_utf8() {
+    let decoded = match percent_encoding::percent_decode_str(trimmed_path).decode_utf8() {
         Ok(d) => d,
         Err(_) => return Ok(not_found()),
     };
 
-    for c in decoded.split('/') {
+    let decoded_path = if base_path != "/" && decoded.starts_with(&base_path) {
+        // Remove the base_path from the request path before processing
+        decoded[base_path.len()..].to_string()
+    } else {
+        decoded.to_string()
+    };
+
+    for c in decoded_path.split('/') {
         path.push(c);
     }
 
@@ -185,7 +191,7 @@ async fn response_error_injector(
         .map(|req| {
             req.headers()
                 .get(header::CONTENT_TYPE)
-                .map(|val| val != &HeaderValue::from_static("text/html"))
+                .map(|val| val != HeaderValue::from_static("text/html"))
                 .unwrap_or(true)
         })
         .unwrap_or(true)
@@ -318,42 +324,74 @@ fn rebuild_done_handling(broadcaster: &Sender, res: Result<()>, reload_path: &st
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn create_new_site(
-    root_dir: &Path,
-    interface: &str,
-    interface_port: u16,
-    output_dir: Option<&Path>,
-    force: bool,
-    base_url: &str,
-    config_file: &Path,
-    include_drafts: bool,
-    no_port_append: bool,
-    ws_port: Option<u16>,
-) -> Result<(Site, String)> {
-    SITE_CONTENT.write().unwrap().clear();
+fn construct_url(base_url: &str, no_port_append: bool, interface_port: u16) -> String {
+    if base_url == "/" {
+        return String::from("/");
+    }
 
-    let mut site = Site::new(root_dir, config_file)?;
-    let address = format!("{}:{}", interface, interface_port);
+    let (protocol, stripped_url) = match base_url {
+        url if url.starts_with("http://") => ("http://", &url[7..]),
+        url if url.starts_with("https://") => ("https://", &url[8..]),
+        url => ("http://", url),
+    };
 
-    let base_url = if base_url == "/" {
-        String::from("/")
-    } else {
-        let base_address = if no_port_append {
-            base_url.to_string()
+    let (domain, path) = {
+        let parts: Vec<&str> = stripped_url.splitn(2, '/').collect();
+        if parts.len() > 1 {
+            (parts[0], format!("/{}", parts[1]))
         } else {
-            format!("{}:{}", base_url, interface_port)
-        };
-
-        if site.config.base_url.ends_with('/') {
-            format!("http://{}/", base_address)
-        } else {
-            format!("http://{}", base_address)
+            (parts[0], String::new())
         }
     };
 
+    let full_address = if no_port_append {
+        format!("{}{}{}", protocol, domain, path)
+    } else {
+        format!("{}{}:{}{}", protocol, domain, interface_port, path)
+    };
+
+    if full_address.ends_with('/') {
+        full_address
+    } else {
+        format!("{}/", full_address)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn create_new_site(
+    root_dir: &Path,
+    interface: IpAddr,
+    interface_port: u16,
+    output_dir: Option<&Path>,
+    force: bool,
+    base_url: Option<&str>,
+    config_file: &Path,
+    include_drafts: bool,
+    mut no_port_append: bool,
+    ws_port: Option<u16>,
+) -> Result<(Site, SocketAddr, String)> {
+    SITE_CONTENT.write().unwrap().clear();
+
+    let mut site = Site::new(root_dir, config_file)?;
+    let address = SocketAddr::new(interface, interface_port);
+
+    // if no base URL provided, use socket address
+    let base_url = base_url.map_or_else(
+        || {
+            no_port_append = true;
+            address.to_string()
+        },
+        |u| u.to_string(),
+    );
+
+    let mut constructed_base_url = construct_url(&base_url, no_port_append, interface_port);
+
+    if !site.config.base_url.ends_with('/') && constructed_base_url != "/" {
+        constructed_base_url.truncate(constructed_base_url.len() - 1);
+    }
+
     site.enable_serve_mode();
-    site.set_base_url(base_url);
+    site.set_base_url(constructed_base_url.clone());
     if let Some(output_dir) = output_dir {
         if !force && output_dir.exists() {
             return Err(Error::msg(format!(
@@ -375,17 +413,17 @@ fn create_new_site(
     messages::notify_site_size(&site);
     messages::warn_about_ignored_pages(&site);
     site.build()?;
-    Ok((site, address))
+    Ok((site, address, constructed_base_url))
 }
 
 #[allow(clippy::too_many_arguments)]
 pub fn serve(
     root_dir: &Path,
-    interface: &str,
+    interface: IpAddr,
     interface_port: u16,
     output_dir: Option<&Path>,
     force: bool,
-    base_url: &str,
+    base_url: Option<&str>,
     config_file: &Path,
     open: bool,
     include_drafts: bool,
@@ -394,7 +432,7 @@ pub fn serve(
     utc_offset: UtcOffset,
 ) -> Result<()> {
     let start = Instant::now();
-    let (mut site, address) = create_new_site(
+    let (mut site, bind_address, constructed_base_url) = create_new_site(
         root_dir,
         interface,
         interface_port,
@@ -406,35 +444,39 @@ pub fn serve(
         no_port_append,
         None,
     )?;
+    let base_path = match constructed_base_url.splitn(4, '/').nth(3) {
+        Some(path) => format!("/{}", path),
+        None => "/".to_string(),
+    };
+
     messages::report_elapsed_time(start);
 
     // Stop right there if we can't bind to the address
-    let bind_address: SocketAddrV4 = match address.parse() {
-        Ok(a) => a,
-        Err(_) => return Err(anyhow!("Invalid address: {}.", address)),
-    };
     if (TcpListener::bind(bind_address)).is_err() {
-        return Err(anyhow!("Cannot start server on address {}.", address));
+        return Err(anyhow!("Cannot start server on address {}.", bind_address));
     }
 
     let config_path = PathBuf::from(config_file);
-    let config_path_rel = diff_paths(&config_path, root_dir).unwrap_or_else(|| config_path.clone());
+    let root_dir_str = root_dir.to_str().expect("Project root dir is not valid UTF-8.");
 
-    // An array of (path, WatchMode) where the path should be watched for changes,
-    // and the WatchMode value indicates whether this file/folder must exist for
-    // zola serve to operate
+    // An array of (path, WatchMode, RecursiveMode) where the path is watched for changes,
+    // the WatchMode value indicates whether this path must exist for zola serve to operate,
+    // and the RecursiveMode value indicates whether to watch nested directories.
     let watch_this = vec![
-        (config_path_rel.to_str().unwrap_or("config.toml"), WatchMode::Required),
-        ("content", WatchMode::Required),
-        ("sass", WatchMode::Condition(site.config.compile_sass)),
-        ("static", WatchMode::Optional),
-        ("templates", WatchMode::Optional),
-        ("themes", WatchMode::Condition(site.config.theme.is_some())),
+        // The first entry is ultimtely to watch config.toml in a more robust manner on Linux when
+        // the file changes by way of a caching strategy used by editors such as vim.
+        // https://github.com/getzola/zola/issues/2266
+        (root_dir_str, WatchMode::Required, RecursiveMode::NonRecursive),
+        ("content", WatchMode::Required, RecursiveMode::Recursive),
+        ("sass", WatchMode::Condition(site.config.compile_sass), RecursiveMode::Recursive),
+        ("static", WatchMode::Optional, RecursiveMode::Recursive),
+        ("templates", WatchMode::Optional, RecursiveMode::Recursive),
+        ("themes", WatchMode::Condition(site.config.theme.is_some()), RecursiveMode::Recursive),
     ];
 
     // Setup watchers
     let (tx, rx) = channel();
-    let mut watcher = watcher(tx, Duration::from_secs(1)).unwrap();
+    let mut debouncer = new_debouncer(Duration::from_secs(1), /*tick_rate=*/ None, tx).unwrap();
 
     // We watch for changes on the filesystem for every entry in watch_this
     // Will fail if either:
@@ -442,16 +484,16 @@ pub fn serve(
     //   - the path exists but has incorrect permissions
     // watchers will contain the paths we're actually watching
     let mut watchers = Vec::new();
-    for (entry, mode) in watch_this {
+    for (entry, watch_mode, recursive_mode) in watch_this {
         let watch_path = root_dir.join(entry);
-        let should_watch = match mode {
+        let should_watch = match watch_mode {
             WatchMode::Required => true,
             WatchMode::Optional => watch_path.exists(),
             WatchMode::Condition(b) => b && watch_path.exists(),
         };
         if should_watch {
-            watcher
-                .watch(root_dir.join(entry), RecursiveMode::Recursive)
+            debouncer.watcher()
+                .watch(&root_dir.join(entry), recursive_mode)
                 .with_context(|| format!("Can't watch `{}` for changes in folder `{}`. Does it exist, and do you have correct permissions?", entry, root_dir.display()))?;
             watchers.push(entry.to_string());
         }
@@ -460,14 +502,13 @@ pub fn serve(
     let ws_port = site.live_reload;
     let ws_address = format!("{}:{}", interface, ws_port.unwrap());
     let output_path = site.output_path.clone();
+    create_directory(&output_path)?;
 
-    // output path is going to need to be moved later on, so clone it for the
-    // http closure to avoid contention.
-    let static_root = output_path.clone();
+    // static_root needs to be canonicalized because we do the same for the http server.
+    let static_root = std::fs::canonicalize(&output_path).unwrap();
+
     let broadcaster = {
         thread::spawn(move || {
-            let addr = address.parse().unwrap();
-
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -476,19 +517,27 @@ pub fn serve(
             rt.block_on(async {
                 let make_service = make_service_fn(move |_| {
                     let static_root = static_root.clone();
+                    let base_path = base_path.clone();
 
                     async {
                         Ok::<_, hyper::Error>(service_fn(move |req| {
-                            response_error_injector(handle_request(req, static_root.clone()))
+                            response_error_injector(handle_request(
+                                req,
+                                static_root.clone(),
+                                base_path.clone(),
+                            ))
                         }))
                     }
                 });
 
-                let server = Server::bind(&addr).serve(make_service);
+                let server = Server::bind(&bind_address).serve(make_service);
 
-                println!("Web server is available at http://{}\n", &address);
+                println!(
+                    "Web server is available at {} (bound to {})\n",
+                    &constructed_base_url, &bind_address
+                );
                 if open {
-                    if let Err(err) = open::that(format!("http://{}", &address)) {
+                    if let Err(err) = open::that(&constructed_base_url) {
                         eprintln!("Failed to open URL in your browser: {}", err);
                     }
                 }
@@ -529,12 +578,17 @@ pub fn serve(
         broadcaster
     };
 
-    println!(
-        "Listening for changes in {}{}{{{}}}",
-        root_dir.display(),
-        MAIN_SEPARATOR,
-        watchers.join(",")
-    );
+    // We watch for changes in the config by monitoring its parent directory, but we ignore all
+    // ordinary peer files. Map the parent directory back to the config file name to not confuse
+    // the end user.
+    let config_name =
+        config_path.file_name().unwrap().to_str().expect("Config name is not valid UTF-8.");
+    let watch_list = watchers
+        .iter()
+        .map(|w| if w == root_dir_str { config_name } else { w })
+        .collect::<Vec<&str>>()
+        .join(",");
+    println!("Listening for changes in {}{}{{{}}}", root_dir.display(), MAIN_SEPARATOR, watch_list);
 
     let preserve_dotfiles_in_output = site.config.preserve_dotfiles_in_output;
 
@@ -549,24 +603,24 @@ pub fn serve(
     })
     .expect("Error setting Ctrl-C handler");
 
-    use notify::DebouncedEvent::*;
-
-    let reload_sass = |site: &Site, path: &Path, partial_path: &Path| {
-        let msg = if path.is_dir() {
-            format!("-> Directory in `sass` folder changed {}", path.display())
-        } else {
-            format!("-> Sass file changed {}", path.display())
-        };
+    let reload_sass = |site: &Site, paths: &Vec<&PathBuf>| {
+        let combined_paths =
+            paths.iter().map(|p| p.display().to_string()).collect::<Vec<String>>().join(", ");
+        let msg = format!("-> Sass file(s) changed {}", combined_paths);
         console::info(&msg);
         rebuild_done_handling(
             &broadcaster,
             compile_sass(&site.base_path, &site.output_path),
-            &partial_path.to_string_lossy(),
+            &site.sass_path.to_string_lossy(),
         );
     };
 
-    let reload_templates = |site: &mut Site, path: &Path| {
-        rebuild_done_handling(&broadcaster, site.reload_templates(), &path.to_string_lossy());
+    let reload_templates = |site: &mut Site| {
+        rebuild_done_handling(
+            &broadcaster,
+            site.reload_templates(),
+            &site.templates_path.to_string_lossy(),
+        );
     };
 
     let copy_static = |site: &Site, path: &Path, partial_path: &Path| {
@@ -615,7 +669,7 @@ pub fn serve(
         no_port_append,
         ws_port,
     ) {
-        Ok((s, _)) => {
+        Ok((s, _, _)) => {
             clear_serve_error();
             rebuild_done_handling(&broadcaster, Ok(()), "/x.js");
 
@@ -633,52 +687,50 @@ pub fn serve(
 
     loop {
         match rx.recv() {
-            Ok(event) => {
-                let can_do_fast_reload = !matches!(event, Remove(_));
+            Ok(Ok(events)) => {
+                let changes = filter_events(
+                    events,
+                    root_dir,
+                    &config_path,
+                    &site.config.ignored_content_globset,
+                );
+                if changes.is_empty() {
+                    continue;
+                }
+                let format = format_description!("[year]-[month]-[day] [hour]:[minute]:[second]");
 
-                match event {
-                    // Intellij does weird things on edit, chmod is there to count those changes
-                    // https://github.com/passcod/notify/issues/150#issuecomment-494912080
-                    Rename(_, path) | Create(path) | Write(path) | Remove(path) | Chmod(path) => {
-                        if is_ignored_file(&site.config.ignored_content_globset, &path) {
-                            continue;
-                        }
+                for (change_kind, change_group) in changes.iter() {
+                    let current_time =
+                        OffsetDateTime::now_utc().to_offset(utc_offset).format(&format);
+                    if let Ok(time_str) = current_time {
+                        println!("Change detected @ {}", time_str);
+                    } else {
+                        // if formatting fails for some reason
+                        println!("Change detected");
+                    };
 
-                        if is_temp_file(&path) {
-                            continue;
-                        }
+                    let start = Instant::now();
+                    match change_kind {
+                        ChangeKind::Content => {
+                            for (_, full_path, event_kind) in change_group.iter() {
+                                console::info(&format!(
+                                    "-> Content changed {}",
+                                    full_path.display()
+                                ));
 
-                        // We only care about changes in non-empty folders
-                        if path.is_dir() && is_folder_empty(&path) {
-                            continue;
-                        }
-
-                        let format =
-                            format_description!("[year]-[month]-[day] [hour]:[minute]:[second]");
-                        let current_time =
-                            OffsetDateTime::now_utc().to_offset(utc_offset).format(&format);
-                        if let Ok(time_str) = current_time {
-                            println!("Change detected @ {}", time_str);
-                        } else {
-                            // if formatting fails for some reason
-                            println!("Change detected");
-                        };
-
-                        let start = Instant::now();
-                        match detect_change_kind(root_dir, &path, &config_path) {
-                            (ChangeKind::Content, _) => {
-                                console::info(&format!("-> Content changed {}", path.display()));
+                                let can_do_fast_reload =
+                                    *event_kind != SimpleFileSystemEventKind::Remove;
 
                                 if fast_rebuild {
                                     if can_do_fast_reload {
-                                        let filename = path
+                                        let filename = full_path
                                             .file_name()
                                             .unwrap_or_else(|| OsStr::new(""))
                                             .to_string_lossy();
                                         let res = if filename == "_index.md" {
-                                            site.add_and_render_section(&path)
+                                            site.add_and_render_section(full_path)
                                         } else if filename.ends_with(".md") {
-                                            site.add_and_render_page(&path)
+                                            site.add_and_render_page(full_path)
                                         } else {
                                             // an asset changed? a folder renamed?
                                             // should we make it smarter so it doesn't reload the whole site?
@@ -693,7 +745,7 @@ pub fn serve(
                                             rebuild_done_handling(
                                                 &broadcaster,
                                                 res,
-                                                &path.to_string_lossy(),
+                                                &full_path.to_string_lossy(),
                                             );
                                         }
                                     } else {
@@ -706,188 +758,305 @@ pub fn serve(
                                     site = s;
                                 }
                             }
-                            (ChangeKind::Templates, partial_path) => {
-                                let msg = if path.is_dir() {
-                                    format!(
-                                        "-> Directory in `templates` folder changed {}",
-                                        path.display()
-                                    )
-                                } else {
-                                    format!("-> Template changed {}", path.display())
-                                };
-                                console::info(&msg);
+                        }
+                        ChangeKind::Templates => {
+                            let partial_paths: Vec<&PathBuf> =
+                                change_group.iter().map(|(p, _, _)| p).collect();
+                            let full_paths: Vec<&PathBuf> =
+                                change_group.iter().map(|(_, p, _)| p).collect();
+                            let combined_paths = full_paths
+                                .iter()
+                                .map(|p| p.display().to_string())
+                                .collect::<Vec<String>>()
+                                .join(", ");
+                            let msg = format!("-> Template file(s) changed {}", combined_paths);
+                            console::info(&msg);
 
-                                // A shortcode changed, we need to rebuild everything
-                                if partial_path.starts_with("/templates/shortcodes") {
-                                    if let Some(s) = recreate_site() {
-                                        site = s;
-                                    }
-                                } else {
-                                    println!("Reloading only template");
-                                    // A normal template changed, no need to re-render Markdown.
-                                    reload_templates(&mut site, &path)
-                                }
-                            }
-                            (ChangeKind::StaticFiles, p) => copy_static(&site, &path, &p),
-                            (ChangeKind::Sass, p) => reload_sass(&site, &path, &p),
-                            (ChangeKind::Themes, _) => {
-                                console::info("-> Themes changed.");
-
+                            let shortcodes_updated = partial_paths
+                                .iter()
+                                .any(|p| p.starts_with("/templates/shortcodes"));
+                            // Rebuild site if shortcodes change; otherwise, just update template.
+                            if shortcodes_updated {
                                 if let Some(s) = recreate_site() {
                                     site = s;
                                 }
+                            } else {
+                                println!("Reloading only template");
+                                reload_templates(&mut site)
                             }
-                            (ChangeKind::Config, _) => {
-                                console::info("-> Config changed. The browser needs to be refreshed to make the changes visible.");
+                        }
+                        ChangeKind::StaticFiles => {
+                            for (partial_path, full_path, _) in change_group.iter() {
+                                copy_static(&site, full_path, partial_path);
+                            }
+                        }
+                        ChangeKind::Sass => {
+                            let full_paths = change_group.iter().map(|(_, p, _)| p).collect();
+                            reload_sass(&site, &full_paths);
+                        }
+                        ChangeKind::Themes => {
+                            // No need to iterate over change group since we're rebuilding the site.
+                            console::info("-> Themes changed.");
 
-                                if let Some(s) = recreate_site() {
-                                    site = s;
-                                }
+                            if let Some(s) = recreate_site() {
+                                site = s;
                             }
-                        };
-                        messages::report_elapsed_time(start);
-                    }
-                    _ => {}
+                        }
+                        ChangeKind::Config => {
+                            // No need to iterate over change group since we're rebuilding the site.
+                            console::info("-> Config changed. The browser needs to be refreshed to make the changes visible.");
+
+                            if let Some(s) = recreate_site() {
+                                site = s;
+                            }
+                        }
+                    };
+                    messages::report_elapsed_time(start);
                 }
             }
-            Err(e) => console::error(&format!("Watch error: {:?}", e)),
+            Ok(Err(e)) => console::error(&format!("File system event errors: {:?}", e)),
+            Err(e) => console::error(&format!("File system event receiver errors: {:?}", e)),
         };
     }
 }
 
-fn is_ignored_file(ignored_content_globset: &Option<GlobSet>, path: &Path) -> bool {
-    match ignored_content_globset {
-        Some(gs) => gs.is_match(path),
-        None => false,
-    }
-}
-
-/// Detect what changed from the given path so we have an idea what needs
-/// to be reloaded
-fn detect_change_kind(pwd: &Path, path: &Path, config_path: &Path) -> (ChangeKind, PathBuf) {
-    let mut partial_path = PathBuf::from("/");
-    partial_path.push(path.strip_prefix(pwd).unwrap_or(path));
-
-    let change_kind = if partial_path.starts_with("/templates") {
-        ChangeKind::Templates
-    } else if partial_path.starts_with("/themes") {
-        ChangeKind::Themes
-    } else if partial_path.starts_with("/content") {
-        ChangeKind::Content
-    } else if partial_path.starts_with("/static") {
-        ChangeKind::StaticFiles
-    } else if partial_path.starts_with("/sass") {
-        ChangeKind::Sass
-    } else if path == config_path {
-        ChangeKind::Config
-    } else {
-        unreachable!("Got a change in an unexpected path: {}", partial_path.display());
-    };
-
-    (change_kind, partial_path)
-}
-
-/// Check if the directory at path contains any file
-fn is_folder_empty(dir: &Path) -> bool {
-    // Can panic if we don't have the rights I guess?
-
-    read_dir(dir).expect("Failed to read a directory to see if it was empty").next().is_none()
-}
-
 #[cfg(test)]
 mod tests {
+    use super::{construct_url, create_new_site};
+    use crate::get_config_file_path;
+    use libs::url::Url;
+    use std::net::{IpAddr, SocketAddr};
     use std::path::{Path, PathBuf};
-
-    use super::{detect_change_kind, is_temp_file, ChangeKind};
+    use std::str::FromStr;
 
     #[test]
-    fn can_recognize_temp_files() {
-        let test_cases = vec![
-            Path::new("hello.swp"),
-            Path::new("hello.swx"),
-            Path::new(".DS_STORE"),
-            Path::new("hello.tmp"),
-            Path::new("hello.html.__jb_old___"),
-            Path::new("hello.html.__jb_tmp___"),
-            Path::new("hello.html.__jb_bak___"),
-            Path::new("hello.html~"),
-            Path::new("#hello.html"),
-            Path::new(".index.md.kate-swp"),
-        ];
+    fn test_construct_url_base_url_is_slash() {
+        let result = construct_url("/", false, 8080);
+        assert_eq!(result, "/");
+    }
 
-        for t in test_cases {
-            assert!(is_temp_file(t));
+    #[test]
+    fn test_construct_url_http_protocol() {
+        let result = construct_url("http://example.com", false, 8080);
+        assert_eq!(result, "http://example.com:8080/");
+    }
+
+    #[test]
+    fn test_construct_url_https_protocol() {
+        let result = construct_url("https://example.com", false, 8080);
+        assert_eq!(result, "https://example.com:8080/");
+    }
+
+    #[test]
+    fn test_construct_url_no_protocol() {
+        let result = construct_url("example.com", false, 8080);
+        assert_eq!(result, "http://example.com:8080/");
+    }
+
+    #[test]
+    fn test_construct_url_no_port_append() {
+        let result = construct_url("https://example.com", true, 8080);
+        assert_eq!(result, "https://example.com/");
+    }
+
+    #[test]
+    fn test_construct_url_trailing_slash() {
+        let result = construct_url("http://example.com/", false, 8080);
+        assert_eq!(result, "http://example.com:8080/");
+    }
+
+    fn create_and_verify_new_site(
+        interface: IpAddr,
+        interface_port: u16,
+        output_dir: Option<&Path>,
+        base_url: Option<&str>,
+        no_port_append: bool,
+        ws_port: Option<u16>,
+        expected_base_url: String,
+    ) {
+        let cli_dir = Path::new("./test_site").canonicalize().unwrap();
+        let cli_config = Path::new("./test_site/config.toml").canonicalize().unwrap();
+
+        let (root_dir, config_file) = get_config_file_path(&cli_dir, &cli_config);
+        assert_eq!(cli_dir, root_dir);
+        assert_eq!(cli_config, root_dir.join("config.toml"));
+
+        let force = false;
+        let include_drafts = false;
+
+        let (site, bind_address, constructed_base_url) = create_new_site(
+            &root_dir,
+            interface,
+            interface_port,
+            output_dir.as_deref(),
+            force,
+            base_url.as_deref(),
+            &config_file,
+            include_drafts,
+            no_port_append,
+            ws_port,
+        )
+        .unwrap();
+
+        assert_eq!(bind_address, SocketAddr::new(interface, interface_port));
+        assert_eq!(constructed_base_url, expected_base_url);
+        assert!(site.base_path.exists());
+        assert_eq!(site.base_path, root_dir);
+        assert_eq!(site.config.base_url, constructed_base_url);
+        assert_ne!(site.live_reload, None);
+        assert_ne!(site.live_reload, Some(1111));
+        assert_eq!(site.output_path, root_dir.join(&site.config.output_dir));
+        assert_eq!(site.static_path, root_dir.join("static"));
+
+        let base_url = Url::parse(&expected_base_url).unwrap();
+        for (_, permalink) in site.permalinks {
+            let permalink_url = Url::parse(&permalink).unwrap();
+            assert_eq!(base_url.scheme(), permalink_url.scheme());
+            assert_eq!(base_url.host(), permalink_url.host());
+            assert_eq!(base_url.port(), permalink_url.port());
+            assert!(!permalink_url.path().starts_with("//"));
+            assert!(!permalink_url.path().ends_with("//"));
+            assert!(permalink_url.path().starts_with("/"));
+            assert!(permalink_url.path().starts_with(base_url.path()));
         }
     }
 
     #[test]
-    fn can_detect_kind_of_changes() {
-        let test_cases = vec![
-            (
-                (ChangeKind::Templates, PathBuf::from("/templates/hello.html")),
-                Path::new("/home/vincent/site"),
-                Path::new("/home/vincent/site/templates/hello.html"),
-                Path::new("/home/vincent/site/config.toml"),
-            ),
-            (
-                (ChangeKind::Themes, PathBuf::from("/themes/hello.html")),
-                Path::new("/home/vincent/site"),
-                Path::new("/home/vincent/site/themes/hello.html"),
-                Path::new("/home/vincent/site/config.toml"),
-            ),
-            (
-                (ChangeKind::StaticFiles, PathBuf::from("/static/site.css")),
-                Path::new("/home/vincent/site"),
-                Path::new("/home/vincent/site/static/site.css"),
-                Path::new("/home/vincent/site/config.toml"),
-            ),
-            (
-                (ChangeKind::Content, PathBuf::from("/content/posts/hello.md")),
-                Path::new("/home/vincent/site"),
-                Path::new("/home/vincent/site/content/posts/hello.md"),
-                Path::new("/home/vincent/site/config.toml"),
-            ),
-            (
-                (ChangeKind::Sass, PathBuf::from("/sass/print.scss")),
-                Path::new("/home/vincent/site"),
-                Path::new("/home/vincent/site/sass/print.scss"),
-                Path::new("/home/vincent/site/config.toml"),
-            ),
-            (
-                (ChangeKind::Config, PathBuf::from("/config.toml")),
-                Path::new("/home/vincent/site"),
-                Path::new("/home/vincent/site/config.toml"),
-                Path::new("/home/vincent/site/config.toml"),
-            ),
-            (
-                (ChangeKind::Config, PathBuf::from("/config.staging.toml")),
-                Path::new("/home/vincent/site"),
-                Path::new("/home/vincent/site/config.staging.toml"),
-                Path::new("/home/vincent/site/config.staging.toml"),
-            ),
-        ];
+    #[cfg(not(windows))]
+    fn test_create_new_site_without_protocol_with_port_without_mounted_path() {
+        let interface = IpAddr::from_str("127.0.0.1").unwrap();
+        let interface_port = 1111;
+        let output_dir: Option<PathBuf> = None;
+        let base_url: Option<String> = None;
+        let no_port_append = false;
+        let ws_port: Option<u16> = None;
+        let expected_base_url = String::from("http://127.0.0.1:1111");
 
-        for (expected, pwd, path, config_filename) in test_cases {
-            assert_eq!(expected, detect_change_kind(pwd, path, config_filename));
-        }
+        create_and_verify_new_site(
+            interface,
+            interface_port,
+            output_dir.as_deref(),
+            base_url.as_deref(),
+            no_port_append,
+            ws_port,
+            expected_base_url,
+        );
     }
 
     #[test]
-    #[cfg(windows)]
-    fn windows_path_handling() {
-        let expected = (ChangeKind::Templates, PathBuf::from("/templates/hello.html"));
-        let pwd = Path::new(r#"C:\Users\johan\site"#);
-        let path = Path::new(r#"C:\Users\johan\site\templates\hello.html"#);
-        let config_filename = Path::new(r#"C:\Users\johan\site\config.toml"#);
-        assert_eq!(expected, detect_change_kind(pwd, path, config_filename));
+    #[cfg(not(windows))]
+    fn test_create_new_site_without_protocol_with_port_with_mounted_path() {
+        let interface = IpAddr::from_str("127.0.0.1").unwrap();
+        let interface_port = 1111;
+        let output_dir: Option<PathBuf> = None;
+        let base_url: Option<String> = Some(String::from("localhost/path/to/site"));
+        let no_port_append = false;
+        let ws_port: Option<u16> = None;
+        let expected_base_url = String::from("http://localhost:1111/path/to/site");
+
+        create_and_verify_new_site(
+            interface,
+            interface_port,
+            output_dir.as_deref(),
+            base_url.as_deref(),
+            no_port_append,
+            ws_port,
+            expected_base_url,
+        );
     }
 
     #[test]
-    fn relative_path() {
-        let expected = (ChangeKind::Templates, PathBuf::from("/templates/hello.html"));
-        let pwd = Path::new("/home/johan/site");
-        let path = Path::new("templates/hello.html");
-        let config_filename = Path::new("config.toml");
-        assert_eq!(expected, detect_change_kind(pwd, path, config_filename));
+    #[cfg(not(windows))]
+    fn test_create_new_site_without_protocol_without_port_without_mounted_path() {
+        let interface = IpAddr::from_str("127.0.0.1").unwrap();
+        let interface_port = 1111;
+        let output_dir: Option<PathBuf> = None;
+        let base_url: Option<String> = Some(String::from("example.com"));
+        let no_port_append = true;
+        let ws_port: Option<u16> = None;
+        let expected_base_url = String::from("http://example.com");
+
+        // Note that no_port_append only works if we define a base_url
+
+        create_and_verify_new_site(
+            interface,
+            interface_port,
+            output_dir.as_deref(),
+            base_url.as_deref(),
+            no_port_append,
+            ws_port,
+            expected_base_url,
+        );
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn test_create_new_site_with_protocol_without_port_without_mounted_path() {
+        let interface = IpAddr::from_str("127.0.0.1").unwrap();
+        let interface_port = 1111;
+        let output_dir: Option<PathBuf> = None;
+        let base_url: Option<String> = Some(String::from("https://example.com"));
+        let no_port_append = true;
+        let ws_port: Option<u16> = None;
+        let expected_base_url = String::from("https://example.com");
+
+        // Note that no_port_append only works if we define a base_url
+
+        create_and_verify_new_site(
+            interface,
+            interface_port,
+            output_dir.as_deref(),
+            base_url.as_deref(),
+            no_port_append,
+            ws_port,
+            expected_base_url,
+        );
+    }
+
+    #[test]
+    fn test_create_new_site_with_protocol_without_port_with_mounted_path() {
+        let interface = IpAddr::from_str("127.0.0.1").unwrap();
+        let interface_port = 1111;
+        let output_dir: Option<PathBuf> = None;
+        let base_url: Option<String> = Some(String::from("https://example.com/path/to/site"));
+        let no_port_append = true;
+        let ws_port: Option<u16> = None;
+        let expected_base_url = String::from("https://example.com/path/to/site");
+
+        // Note that no_port_append only works if we define a base_url
+
+        create_and_verify_new_site(
+            interface,
+            interface_port,
+            output_dir.as_deref(),
+            base_url.as_deref(),
+            no_port_append,
+            ws_port,
+            expected_base_url,
+        );
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn test_create_new_site_with_protocol_with_port_with_mounted_path() {
+        let interface = IpAddr::from_str("127.0.0.1").unwrap();
+        let interface_port = 1111;
+        let output_dir: Option<PathBuf> = None;
+        let base_url: Option<String> = Some(String::from("https://example.com/path/to/site"));
+        let no_port_append = false;
+        let ws_port: Option<u16> = None;
+        let expected_base_url = String::from("https://example.com:1111/path/to/site");
+
+        // Note that no_port_append only works if we define a base_url
+
+        create_and_verify_new_site(
+            interface,
+            interface_port,
+            output_dir.as_deref(),
+            base_url.as_deref(),
+            no_port_append,
+            ws_port,
+            expected_base_url,
+        );
     }
 }

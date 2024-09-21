@@ -6,8 +6,9 @@ use std::path::{Path, PathBuf};
 use config::Config;
 use errors::{anyhow, Context, Result};
 use libs::ahash::{HashMap, HashSet};
+use libs::image::codecs::jpeg::JpegEncoder;
 use libs::image::imageops::FilterType;
-use libs::image::{EncodableLayout, ImageOutputFormat};
+use libs::image::{EncodableLayout, ImageFormat};
 use libs::rayon::prelude::*;
 use libs::{image, webp};
 use serde::{Deserialize, Serialize};
@@ -38,7 +39,8 @@ impl ImageOp {
             return Ok(());
         }
 
-        let mut img = image::open(&self.input_path)?;
+        let img = image::open(&self.input_path)?;
+        let mut img = fix_orientation(&img, &self.input_path).unwrap_or(img);
 
         let img = match self.instr.crop_instruction {
             Some((x, y, w, h)) => img.crop(x, y, w, h),
@@ -49,17 +51,16 @@ impl ImageOp {
             None => img,
         };
 
-        let img = fix_orientation(&img, &self.input_path).unwrap_or(img);
-
         let f = File::create(&self.output_path)?;
         let mut buffered_f = BufWriter::new(f);
 
         match self.format {
             Format::Png => {
-                img.write_to(&mut buffered_f, ImageOutputFormat::Png)?;
+                img.write_to(&mut buffered_f, ImageFormat::Png)?;
             }
             Format::Jpeg(q) => {
-                img.write_to(&mut buffered_f, ImageOutputFormat::Jpeg(q))?;
+                let mut encoder = JpegEncoder::new_with_quality(&mut buffered_f, q);
+                encoder.encode_image(&img)?;
             }
             Format::WebP(q) => {
                 let encoder = webp::Encoder::from_image(&img)
@@ -177,7 +178,7 @@ impl Processor {
     /// Run the enqueued image operations
     pub fn do_process(&mut self) -> Result<()> {
         if !self.img_ops.is_empty() {
-            ufs::ensure_directory_exists(&self.output_dir)?;
+            ufs::create_directory(&self.output_dir)?;
         }
 
         self.img_ops
@@ -197,7 +198,7 @@ impl Processor {
             return Ok(());
         }
 
-        ufs::ensure_directory_exists(&self.output_dir)?;
+        ufs::create_directory(&self.output_dir)?;
         let output_paths: HashSet<_> = self
             .img_ops
             .iter()

@@ -160,7 +160,8 @@ pub struct SerializingSection<'a> {
     subsections: Vec<&'a str>,
     translations: Vec<TranslatedContent<'a>>,
     backlinks: Vec<BackLink<'a>>,
-    generate_feed: bool,
+    generate_feeds: bool,
+    transparent: bool,
 }
 
 #[derive(Debug)]
@@ -219,7 +220,8 @@ impl<'a> SerializingSection<'a> {
             reading_time: section.reading_time,
             assets: &section.serialized_assets,
             lang: &section.lang,
-            generate_feed: section.meta.generate_feed,
+            generate_feeds: section.meta.generate_feeds,
+            transparent: section.meta.transparent,
             pages,
             subsections,
             translations,
